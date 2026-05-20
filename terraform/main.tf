@@ -142,6 +142,7 @@ resource "aws_instance" "api_gateway" {
   user_data = <<EOF
 #!/bin/bash
 set -e
+export HOME=/root
 apt-get update -y
 apt-get install -y git curl jq
 
@@ -190,6 +191,7 @@ resource "aws_instance" "inference_worker" {
   user_data = <<EOF
 #!/bin/bash
 set -e
+export HOME=/root
 apt-get update -y
 apt-get install -y git python3 python3-pip jq
 
