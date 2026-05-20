@@ -17,19 +17,22 @@ model = Llama.from_pretrained(
     n_ctx=512,
     n_threads=1,
     verbose=False,
-    chat_format="gemma",
 )
 
 
 def run_inference_handler(payload: Dict[str, Any]) -> str:
     messages = payload.get("messages", [])
 
-    response = model.create_chat_completion(
-        messages=messages,
-        max_tokens=64,
-        stop=["<end_of_turn>", "<eos>"],
-    )
-    result = response["choices"][0]["message"]["content"].strip()
+    # gemma-3-270m is a base model — use few-shot Q&A completion format
+    prompt = "Q: What is 1+1?\nA: 2\n\nQ: What color is the sky?\nA: Blue\n\n"
+    for msg in messages:
+        if msg["role"] == "user":
+            prompt += f"Q: {msg['content']}\nA:"
+        elif msg["role"] == "assistant":
+            prompt += f" {msg['content']}\n\n"
+
+    response = model(prompt, max_tokens=32, stop=["\n", "Q:"])
+    result = response["choices"][0]["text"].strip()
     print(result)
     return result
 
