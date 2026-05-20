@@ -11,9 +11,9 @@ variable "instance_type" {
 }
 
 variable "inference_instance_type" {
-  description = "EC2 instance type for the inference worker VM (needs >=8 GiB RAM for gemma-3-270m Q8)"
+  description = "EC2 instance type for the inference worker VM"
   type        = string
-  default     = "t3.large"
+  default     = "t3.micro"
 }
 
 variable "public_key_path" {
