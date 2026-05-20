@@ -1,53 +1,84 @@
-# Distributed Inference on AWS with iii
+# Distributed Inference on AWS
 
-This project deploys a distributed inference system across two EC2 instances using the [iii](https://iii.dev) worker framework. A public-facing API gateway handles HTTP requests and routes them to a private inference worker running gemma-3-270m (GGUF Q8) via llama.cpp.
-
----
-
-## Architecture
-
-```
-Internet
-    │
-    ▼
-┌─────────────────────────────────────┐
-│  api-gateway (public subnet)        │
-│  10.0.1.0/24                        │
-│                                     │
-│  iii engine   :49134  (WebSocket)   │
-│  iii-http     :3111   (HTTP API)    │
-│  caller-worker (tsx, systemd)       │
-└──────────────┬──────────────────────┘
-               │ WebSocket ws://10.0.1.x:49134
-               ▼
-┌─────────────────────────────────────┐
-│  inference-worker (private subnet)  │
-│  10.0.2.0/24                        │
-│                                     │
-│  Python worker + llama-cpp-python   │
-│  gemma-3-270m-Q8_0.gguf            │
-└─────────────────────────────────────┘
-```
-
-**Request flow:**
-```
-POST /v1/chat/completions
-  → iii-http plugin
-  → http::run_inference_over_http  (caller-worker)
-  → inference::get_response        (caller-worker)
-  → inference::run_inference       (inference-worker, private VM)
-  → response back through chain
-```
-
-The inference worker lives in the private subnet with no public IP. It connects outbound to the iii engine over WebSocket — the engine never needs to reach into the private subnet.
+Two EC2 instances running a distributed inference pipeline using the [iii](https://iii.dev) worker framework. Provisioned entirely with Terraform.
 
 ---
 
-## Prerequisites
+## AWS Infrastructure
 
-- AWS account with credentials configured (`aws configure`)
-- Terraform >= 1.3
-- An EC2 key pair — generate one and note the path to the `.pem` file
+```
+                          ┌──────────────── VPC 10.0.0.0/16 ────────────────┐
+                          │                                                   │
+Internet ──► IGW ──►      │  Public Subnet 10.0.1.0/24                       │
+                          │  ┌──────────────────────────────┐                │
+                          │  │  api-gateway (t3.micro)       │                │
+                          │  │  Ubuntu 22.04                 │                │
+                          │  │  - iii engine  :49134         │                │
+                          │  │  - iii-http    :3111          │                │
+                          │  │  - caller-worker (systemd)    │                │
+                          │  └──────────────┬───────────────┘                │
+                          │                 │ ws://10.0.1.x:49134            │
+                          │  Private Subnet 10.0.2.0/24                      │
+                          │  ┌──────────────▼───────────────┐                │
+                          │  │  inference-worker (t3.micro)  │                │
+                          │  │  Ubuntu 22.04, 20GB EBS       │                │
+                          │  │  - Python + llama-cpp-python  │                │
+                          │  │  - gemma-3-270m-Q8_0.gguf    │                │
+                          │  └──────────────────────────────┘                │
+                          │                 │                                 │
+                          │                 ▼                                 │
+                          │       NAT Gateway (EIP)                           │
+                          │       └──► IGW ──► Internet                       │
+                          │           (model download only)                   │
+                          └───────────────────────────────────────────────────┘
+```
+
+### Terraform resources
+
+| Resource | Purpose |
+|---|---|
+| `aws_vpc.main` | VPC with DNS hostnames enabled, CIDR 10.0.0.0/16 |
+| `aws_subnet.public` | api-gateway lives here, map_public_ip_on_launch = true |
+| `aws_subnet.private` | inference-worker lives here, no public IP |
+| `aws_internet_gateway.gw` | Outbound internet for public subnet |
+| `aws_eip.nat` + `aws_nat_gateway.nat` | Lets the private VM reach the internet for pip install and model download |
+| `aws_route_table.public` | Default route → IGW |
+| `aws_route_table.private` | Default route → NAT gateway |
+| `aws_security_group.api_sg` | Port 3111 open to internet, port 49134 open from private subnet only, port 22 from `var.ssh_allowed_cidr` |
+| `aws_security_group.worker_sg` | All TCP from VPC CIDR (10.0.0.0/16) — api-gateway needs to be able to reach the worker |
+| `aws_key_pair.deployer` | Deploys your public key to both instances |
+| `aws_instance.api_gateway` | t3.micro, public subnet, runs iii engine + caller-worker via user_data |
+| `aws_instance.inference_worker` | t3.micro, private subnet, 20GB EBS, runs Python inference worker via user_data |
+| `data.aws_ami.ubuntu` | Always resolves to latest Ubuntu 22.04 LTS (Canonical owner ID) |
+
+### Security groups
+
+**api_sg (api-gateway):**
+```
+ingress  0.0.0.0/0          tcp  3111   # HTTP inference API
+ingress  10.0.2.0/24        tcp  49134  # iii WebSocket — inference worker only
+ingress  var.ssh_allowed_cidr tcp  22   # SSH
+egress   0.0.0.0/0          all  *      # unrestricted
+```
+
+**worker_sg (inference-worker):**
+```
+ingress  10.0.0.0/16        tcp  0-65535  # all internal VPC traffic
+egress   0.0.0.0/0          all  *        # NAT gateway → internet
+```
+
+---
+
+## Variables (`terraform/variables.tf`)
+
+| Variable | Default | Description |
+|---|---|---|
+| `aws_region` | `us-east-1` | AWS region |
+| `instance_type` | `t3.micro` | api-gateway instance type |
+| `inference_instance_type` | `t3.micro` | inference-worker instance type |
+| `public_key_path` | — | Path to your SSH public key (required) |
+| `ssh_allowed_cidr` | `0.0.0.0/0` | CIDR allowed to SSH into api-gateway |
+| `repo_url` | — | Git repo URL cloned into /opt/app on both VMs (required) |
 
 ---
 
@@ -57,22 +88,13 @@ The inference worker lives in the private subnet with no public IP. It connects 
 cd terraform
 
 cp terraform.tfvars.example terraform.tfvars
-# Edit terraform.tfvars:
-#   public_key_path = "/path/to/your/keypair.pub"
-#   repo_url        = "https://github.com/<you>/distributed-inference.git"
+# fill in public_key_path and repo_url
 
 terraform init
 terraform apply
 ```
 
-Terraform provisions:
-- VPC with public and private subnets
-- NAT gateway (so the private VM can download the model on first boot)
-- api-gateway EC2 (Ubuntu 22.04, t3.micro, public subnet)
-- inference-worker EC2 (Ubuntu 22.04, t3.micro, private subnet, 20GB EBS)
-- Security groups — port 3111 open to internet, port 49134 open only from private subnet
-
-After `apply` you'll get:
+Outputs after apply:
 ```
 api_gateway_public_ip      = "x.x.x.x"
 inference_worker_private_ip = "10.0.2.x"
@@ -80,40 +102,40 @@ inference_worker_private_ip = "10.0.2.x"
 
 ---
 
-## First-boot setup (manual steps after terraform apply)
+## First-boot setup
 
-The user_data scripts handle installing dependencies and setting up systemd services on both VMs. But a few things need to be done manually once:
+`user_data` installs dependencies and sets up systemd services automatically. Two manual steps are needed once after the first apply:
 
-### On the inference worker (jump through api-gateway)
+### Inference worker (SSH via jump host)
 
 ```bash
 ssh-add /path/to/keypair.pem
-ssh -A -J ubuntu@<api_gateway_ip> ubuntu@<inference_worker_private_ip>
+ssh -A -J ubuntu@<api_gateway_public_ip> ubuntu@<inference_worker_private_ip>
 
-# Expand filesystem to use the full 20GB EBS volume
+# The EBS volume is 20GB but the OS partition starts at 8GB — grow it
 sudo growpart /dev/nvme0n1 1
 sudo resize2fs /dev/nvme0n1p1
+df -h /   # should show ~20GB
 
-# Add swap (model loading needs it on t3.micro)
+# 4GB swap so the model can load on 1GB RAM
 sudo fallocate -l 4G /swapfile
 sudo chmod 600 /swapfile
 sudo mkswap /swapfile
 sudo swapon /swapfile
 
-# Install llama-cpp-python (compiles from source, takes ~10 min)
+# llama-cpp-python compiles from source (~10 min on t3.micro)
 sudo pip3 install llama-cpp-python huggingface-hub
 
 sudo systemctl restart inference-worker
 sudo journalctl -u inference-worker -f
-# Wait for: "Inference worker started - listening for calls"
+# wait for: Inference worker started - listening for calls
 ```
 
-### On the api-gateway
+### API gateway
 
 ```bash
-ssh ubuntu@<api_gateway_ip>
+ssh ubuntu@<api_gateway_public_ip>
 
-# Create the caller-worker systemd service
 sudo tee /etc/systemd/system/caller-worker.service << 'EOF'
 [Unit]
 Description=iii caller worker
@@ -143,7 +165,6 @@ curl -s -X POST http://<api_gateway_public_ip>:3111/v1/chat/completions \
   -d '{"messages":[{"role":"user","content":"Hello, what is 2+2?"}]}' | jq .
 ```
 
-Expected response shape:
 ```json
 {
   "result": {
@@ -155,55 +176,33 @@ Expected response shape:
 
 ---
 
-## What I fixed from the starter code
+## What I fixed
 
-The repo had a working skeleton but several things were broken or missing for actual deployment:
+**Terraform (most of the work was here):**
+- The starter had no AMI data source — it used a hardcoded `ami_id` variable that defaulted to an Amazon Linux 2 AMI. Amazon Linux 2 ships glibc 2.26 which is too old for the iii binary and Node.js 20. Added a `data "aws_ami" "ubuntu"` block pointing at Ubuntu 22.04 (Canonical owner `099720109477`) so the AMI always resolves to the latest Jammy LTS.
+- No NAT gateway — the private subnet had a route table but nowhere to route outbound traffic. The inference worker couldn't run `pip install` or download the model. Added `aws_eip`, `aws_nat_gateway`, and a private route table pointing at it.
+- The inference worker had no `root_block_device` block so it got the default 8GB EBS volume. That's not enough room for Python packages (~2GB), the GGUF model (~270MB), and OS overhead. Set `volume_size = 20`.
+- `worker_sg` only allowed ingress from `10.0.2.0/24` (the private subnet itself). The api-gateway is at `10.0.1.x` so it couldn't reach the worker. Changed to `aws_vpc.main.cidr_block` (10.0.0.0/16).
+- Added `ssh_allowed_cidr`, `inference_instance_type`, and `repo_url` variables that were missing.
 
-**Terraform:**
-- No AMI data source — added `data "aws_ami" "ubuntu"` to pin to Ubuntu 22.04 (Amazon Linux 2's glibc 2.26 is too old for the iii binary and Node 20)
-- No NAT gateway — the private inference VM couldn't reach the internet to download the model
-- Missing `root_block_device` on inference worker — 8GB default was too small for the model + dependencies
-- Security group for inference worker only allowed ingress from its own subnet; changed to full VPC CIDR so the api-gateway can reach it
-- Added `ssh_allowed_cidr`, `inference_instance_type`, and `repo_url` variables
-
-**config.yaml:**
-- `host` was `127.0.0.1` — changed to `0.0.0.0` so external traffic reaches the iii-http endpoint
-- Removed inference-worker from the managed workers list (iii-worker requires KVM for its VM sandbox, which EC2 doesn't support; the inference worker connects as a standalone process instead)
-
-**inference_worker.py:**
-- Worker name was `math-worker` instead of `inference-worker`
-- Switched inference backend from transformers (which de-quantizes GGUF to float32, ~1GB RAM, too slow for 30s timeout) to llama-cpp-python (runs Q8 natively on CPU, 5-15x faster)
-- Used few-shot completion prompt format since gemma-3-270m is a base model, not instruction-tuned
-
-**requirements.txt:**
-- Pinned `transformers<5.0.0` (5.x removed `gguf` from the package distribution mapping, breaking the GGUF loader)
-- Replaced transformers+torch stack with llama-cpp-python after the performance issue was discovered
-
-**caller-worker:**
-- The iii-sdk was at 0.11.0 while the iii binary was 0.12.0 — updated to match
-- Fixed response structure: `...result` spreads a Python string as `{}` in JS; changed to `response: result`
+**Application:**
+- `config.yaml` had `host: 127.0.0.1` on the HTTP plugin — changed to `0.0.0.0`
+- The iii-worker VM sandbox requires KVM which isn't available on EC2 (no nested virtualization). The caller-worker's TypeScript code never executed. Removed it from config.yaml and run it as a standalone systemd service instead.
+- Switched inference backend from transformers to llama-cpp-python. transformers de-quantizes GGUF tensors to float32 at load time — the model fit in RAM but inference was too slow (~60-120s per query) for the 30s invocation timeout. llama-cpp-python runs the Q8 weights natively and completes in 5-10s.
+- iii-sdk version on caller-worker was 0.11.0, iii binary was 0.12.0 — updated to match.
 
 ---
 
-## Production hardening notes
+## Production hardening
 
-Things I'd change before running this in production:
+**AWS/Terraform changes I'd make:**
 
-**Security:**
-- `ssh_allowed_cidr` defaults to `0.0.0.0/0` — should be locked to a specific IP or bastion range
-- The inference VM has no SSH access from outside at all (only via jump host) which is correct, but I'd also remove the key pair from it entirely and use SSM Session Manager instead
-- The API has no authentication — add an API key check in the caller-worker before routing to inference
-
-**Reliability:**
-- The model download happens at service startup and isn't cached between restarts — pre-bake the model into an AMI or mount it from EFS
-- llama-cpp-python is compiled from source on every fresh instance — add it to the AMI or use a pre-built Docker image
-- Both VMs are single instances with no auto-recovery — put the inference worker in an ASG with min=1 to auto-replace failed instances
-
-**Performance:**
-- t3.micro (1 vCPU, 1GB RAM) with 4GB swap works but is slow (~5-10s per response for 32 tokens). For anything real, use at least a c5.xlarge for the inference VM, or switch to a GPU instance
-- The iii-http `default_timeout` is 120s and the invocation timeout appears to be hardcoded at 30s — worth raising this if using larger models
-
-**Infrastructure:**
-- Terraform state is local — move it to S3 + DynamoDB for team use
-- No TLS on port 3111 — put an ALB with ACM cert in front
-- The NAT gateway costs ~$35/month even when idle — use a NAT instance instead for a dev environment
+- Move Terraform state to S3 + DynamoDB (`backend "s3"` block) — right now it's local and would be a problem with any team or CI pipeline
+- Lock `ssh_allowed_cidr` to your office IP or a bastion host, not `0.0.0.0/0`
+- Replace the EC2 key pair on the inference worker with SSM Session Manager — no inbound SSH needed at all for the private VM
+- Put an ALB in front of port 3111 with an ACM certificate so the API is HTTPS
+- Use an ASG for the inference worker (`aws_autoscaling_group`, min=1) so it recovers automatically if the instance dies
+- Bake the model and Python dependencies into a custom AMI (`aws_ami` from Packer). Right now the model downloads from HuggingFace on every fresh instance and llama-cpp-python compiles from source — that's a 15-20 minute boot time
+- The NAT gateway costs ~$35/month idle. For a dev setup use a NAT instance (`fck-nat` or similar) in the public subnet instead
+- Add an IAM instance profile to the inference worker with read-only access to an S3 bucket where the model is stored — faster and cheaper than downloading from HuggingFace every time
+- Add CloudWatch alarms on the inference worker's memory and CPU — it's running close to the limit and will silently OOM without any alerting
