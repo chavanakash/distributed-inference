@@ -14,7 +14,7 @@ iii.registerFunction(
     });
 
     return {
-      ...result,
+      response: result,
       success:
         "You've connected two workers and they're interoperating seamlessly, now let's add a few more workers to expand this project's functionality.",
     };
