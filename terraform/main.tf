@@ -1,3 +1,18 @@
+data "aws_ami" "ubuntu" {
+  most_recent = true
+  owners      = ["099720109477"] # Canonical
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
 resource "aws_vpc" "main" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_hostnames = true
@@ -116,7 +131,7 @@ resource "aws_key_pair" "deployer" {
 }
 
 resource "aws_instance" "api_gateway" {
-  ami                         = var.ami_id
+  ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.instance_type
   subnet_id                   = aws_subnet.public.id
   vpc_security_group_ids      = [aws_security_group.api_sg.id]
@@ -127,16 +142,16 @@ resource "aws_instance" "api_gateway" {
   user_data = <<EOF
 #!/bin/bash
 set -e
-yum update -y
-yum install -y git curl
+apt-get update -y
+apt-get install -y git curl jq
 
 # Node.js 20
-curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
-yum install -y nodejs
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt-get install -y nodejs
 
-# iii CLI — see https://iii.dev/docs for the canonical install command
+# iii CLI
 curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
-export PATH="$$HOME/.iii/bin:$$PATH"
+export PATH="/root/.local/bin:$$PATH"
 
 # Project
 git clone ${var.repo_url} /opt/app
@@ -150,7 +165,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/app/quickstart
-ExecStart=/root/.iii/bin/iii --config /opt/app/quickstart/config.yaml
+ExecStart=/root/.local/bin/iii --config /opt/app/quickstart/config.yaml
 Restart=on-failure
 Environment=HOME=/root
 
@@ -164,7 +179,7 @@ EOF
 }
 
 resource "aws_instance" "inference_worker" {
-  ami                         = var.ami_id
+  ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.inference_instance_type
   subnet_id                   = aws_subnet.private.id
   vpc_security_group_ids      = [aws_security_group.worker_sg.id]
@@ -175,8 +190,8 @@ resource "aws_instance" "inference_worker" {
   user_data = <<EOF
 #!/bin/bash
 set -e
-yum update -y
-yum install -y git python3 python3-pip
+apt-get update -y
+apt-get install -y git python3 python3-pip jq
 
 # Project
 git clone ${var.repo_url} /opt/app
@@ -190,7 +205,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/app/quickstart/workers/inference-worker
-ExecStart=/usr/bin/python3 inference_worker.py
+ExecStart=/usr/bin/python3 /opt/app/quickstart/workers/inference-worker/inference_worker.py
 Restart=on-failure
 Environment=III_URL=ws://${aws_instance.api_gateway.private_ip}:49134
 
