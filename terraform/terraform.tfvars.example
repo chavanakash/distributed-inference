@@ -1,0 +1,8 @@
+public_key_path = "/path/to/your/aws-keypair.pub"
+repo_url        = "https://github.com/<you>/distributed-inference.git"
+
+# Optional overrides
+# aws_region             = "us-east-1"
+# instance_type          = "t3.micro"
+# inference_instance_type = "t3.large"
+# ssh_allowed_cidr       = "1.2.3.4/32"   # restrict to your IP in production

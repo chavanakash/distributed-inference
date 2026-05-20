@@ -1,0 +1,15 @@
+# Terraform state — contains live resource IDs, IPs, account numbers
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+
+# Terraform working directory
+terraform/.terraform/
+
+# Local variable overrides — may contain key paths
+terraform/terraform.tfvars
+
+# Python / Node artifacts
+__pycache__/
+*.pyc
+node_modules/
+quickstart/data/
