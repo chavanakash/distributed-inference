@@ -30,7 +30,7 @@ workers:
       port: 3111
       # Bind to all interfaces so external traffic reaches the engine on the api-gateway VM
       host: 0.0.0.0
-      default_timeout: 30000
+      default_timeout: 120000
       concurrency_request_limit: 1024
       cors:
         allowed_origins:
