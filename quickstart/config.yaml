@@ -41,8 +41,7 @@ workers:
         - PUT
         - DELETE
         - OPTIONS
-  # caller-worker runs locally on the api-gateway VM (managed by iii engine)
-  - name: caller-worker
-    worker_path: ./workers/caller-worker
+  # caller-worker runs as a standalone systemd service on the api-gateway VM
+  # (iii-worker VM requires KVM which is unavailable on EC2; run directly via tsx)
   # inference-worker is remote — it starts on the inference VM and connects
   # to this engine via III_URL=ws://<api_gateway_private_ip>:49134
