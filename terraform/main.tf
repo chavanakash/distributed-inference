@@ -127,15 +127,15 @@ resource "aws_instance" "api_gateway" {
   user_data = <<EOF
 #!/bin/bash
 set -e
-apt-get update -y
-apt-get install -y git curl
+yum update -y
+yum install -y git curl
 
 # Node.js 20
-curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-apt-get install -y nodejs
+curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+yum install -y nodejs
 
 # iii CLI — see https://iii.dev/docs for the canonical install command
-curl -fsSL https://iii.dev/install.sh | sh
+curl -fsSL https://install.iii.dev/iii/main/install.sh | sh
 export PATH="$$HOME/.iii/bin:$$PATH"
 
 # Project
@@ -150,7 +150,7 @@ After=network.target
 
 [Service]
 WorkingDirectory=/opt/app/quickstart
-ExecStart=/root/.iii/bin/iii start
+ExecStart=/root/.iii/bin/iii --config /opt/app/quickstart/config.yaml
 Restart=on-failure
 Environment=HOME=/root
 
@@ -175,8 +175,8 @@ resource "aws_instance" "inference_worker" {
   user_data = <<EOF
 #!/bin/bash
 set -e
-apt-get update -y
-apt-get install -y git python3 python3-pip
+yum update -y
+yum install -y git python3 python3-pip
 
 # Project
 git clone ${var.repo_url} /opt/app
