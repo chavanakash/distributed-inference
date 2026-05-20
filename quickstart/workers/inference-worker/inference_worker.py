@@ -17,24 +17,19 @@ model = Llama.from_pretrained(
     n_ctx=512,
     n_threads=1,
     verbose=False,
+    chat_format="gemma",
 )
-
-
-def _build_prompt(messages: List[Dict[str, Any]]) -> str:
-    prompt = ""
-    for msg in messages:
-        role = "model" if msg["role"] == "assistant" else msg["role"]
-        prompt += f"<start_of_turn>{role}\n{msg['content']}<end_of_turn>\n"
-    prompt += "<start_of_turn>model\n"
-    return prompt
 
 
 def run_inference_handler(payload: Dict[str, Any]) -> str:
     messages = payload.get("messages", [])
-    prompt = _build_prompt(messages)
 
-    response = model(prompt, max_tokens=64, stop=["<end_of_turn>"])
-    result = response["choices"][0]["text"].strip()
+    response = model.create_chat_completion(
+        messages=messages,
+        max_tokens=64,
+        stop=["<end_of_turn>", "<eos>"],
+    )
+    result = response["choices"][0]["message"]["content"].strip()
     print(result)
     return result
 
