@@ -188,6 +188,10 @@ resource "aws_instance" "inference_worker" {
   key_name                    = aws_key_pair.deployer.key_name
   tags = { Name = "inference-worker" }
 
+  root_block_device {
+    volume_size = 20
+  }
+
   user_data = <<EOF
 #!/bin/bash
 set -e
